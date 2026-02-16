@@ -196,20 +196,31 @@ def improved_price_plot(df, ticker_name, column='price'):
             fontsize=9, verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
-def plot_var_results(df_results):
+def plot_var_results(df_results, models=None):
         # Reset the index to get clean datetime values
         df_plot = df_results.copy()
+        df_plot.loc[df_plot['realized'] > 0, 'realized'] = np.nan
+
         df_plot.index = pd.to_datetime([idx[0] if isinstance(idx, tuple) else idx for idx in df_plot.index])
 
         # Create figure and axis
         fig, ax = plt.subplots(figsize=(14, 6))
 
-        # Plot VaR as a line
-        ax.plot(df_plot.index, df_plot['predicted'], 
-                color='blue', linewidth=2, label='Predicted VaR', linestyle='--')
+        colors = ['blue', 'purple', 'green', 'red', 'orange', 'cyan', 'magenta', 'yellow', 'black', 'gray']
+        
+        if models is None:
+            models = ['predicted']
+        
+        breaches = df_plot['realized'] != df_plot['realized']
 
-        # Separate points based on whether they breach VaR
-        breaches = df_plot['realized'] < df_plot['predicted']
+        for i, model in enumerate(models):
+                # Plot VaR as a line
+                ax.plot(df_plot.index, df_plot[model], 
+                        color=colors[i], linewidth=2, label=model, linestyle='--')
+
+                # Separate points based on whether they breach VaR
+                breaches |= df_plot['realized'] < df_plot[model]
+        
         non_breaches = ~breaches
 
         # Plot non-breach points in green
@@ -228,13 +239,54 @@ def plot_var_results(df_results):
         # Labels and title
         ax.set_xlabel('Date', fontsize=12)
         ax.set_ylabel('Returns', fontsize=12)
-        ax.set_title('VaR Model: Predicted vs Realized Returns', fontsize=14, fontweight='bold')
+        ax.set_title(f'VaR Model: {", ".join(models)} vs Realized Returns', fontsize=14, fontweight='bold')
         ax.legend(loc='best')
         ax.grid(True, alpha=0.3)
 
         # Tight layout to prevent label cutoff
         plt.tight_layout()
         plt.show()
+
+import matplotlib.dates as mdates
+
+def compare_two_models(df_results, model_1, model_2):
+    # Create the Focused Plot (Negative Only)
+    plt.figure(figsize=(15, 7))
+
+    # 1. Plot Realized Returns (The Chaos)
+    # We plot everything, but we will crop the view later
+    plt.plot(df_results.index, df_results['realized'], 
+            color='gray', alpha=0.3, linewidth=1, label='Realized Returns')
+
+    # 2. Plot The Failure (Naive Model)
+    plt.plot(df_results.index, df_results[model_1], 
+            color='red', linestyle='--', linewidth=2, alpha=0.7, 
+            label=model_1)
+
+    # 3. Plot The Solution (Physics-Informed)
+    plt.plot(df_results.index, df_results[model_2], 
+            color='green', linewidth=2.5, 
+            label=model_2)
+
+    # Formatting
+    plt.title(f"Comparing two models: {model_1} v/s {model_2} (Negative Returns Only)", fontsize=14, fontweight='bold')
+    plt.ylabel("Log Returns / VaR", fontsize=12)
+    plt.xlabel("Date", fontsize=12)
+    plt.legend(loc='lower left', frameon=True, fontsize=11)
+    plt.grid(True, alpha=0.2)
+
+    # --- THE TRICK: Focus on Negative Side ---
+    plt.ylim(top=0.0) # Cut off positive returns
+    plt.axhline(0, color='black', linewidth=0.5) # Add a zero line
+
+    # Format x-axis dates nicely
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    plt.xticks(rotation=45)
+
+    plt.tight_layout()
+    plt.show()
+
 
 
 def plot_breach_rate(df_results, alpha=0.01):
