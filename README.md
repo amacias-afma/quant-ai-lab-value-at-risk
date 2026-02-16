@@ -17,7 +17,7 @@ By constraining the Neural Network with a statistical anchor (Parametric VaR), w
 * **Efficient:** Frees up ~38% more capital compared to naive models.
 * **Dynamic:** 2x more responsive to volatility than standard Historical Simulation.
 
-![Comparison Plot](images/'plot_results.png')
+![Comparison Plot](images/plot_results.png)
 
 ---
 
