@@ -5,7 +5,18 @@ import torch.optim as optim
 
 import pandas as pd
 import numpy as np
+import random
 from src.models.deep_var.parametric_model import priori_value_at_risk
+
+def set_seed(seed=42):
+    """Sets the seed for reproducibility."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # 1. The Single Neuron Model
 class SimpleQuantileNeuron(nn.Module):
@@ -50,10 +61,24 @@ class QuantileLSTM(nn.Module):
         prediction = self.fc(last_step_output)
         return prediction
 
-def train_model(data, model_type='SimpleQuantileNeuron', alpha=0.05, epochs=500, lr=0.01, rolling=22, 
-    split_type={'percentage': 0.8}, regularization_pm=None):
+def train_model(data, 
+                model_type='SimpleQuantileNeuron', 
+                alpha=0.05, 
+                epochs=500, 
+                lr=0.01, 
+                rolling=22, 
+                split_type={'percentage': 0.8}, 
+                regularization_pm=None, 
+                hidden_size=64,
+                num_layers=1,
+                pretrained_state_dict=None,
+                silent=False,
+                seed=42): # <--- ADDED SEED ARGUMENT
 
-    print(f"--- 🧠 Training Single Neuron Quantile Regressor (alpha={alpha}) ---")
+    # 1. FIX RANDOMNESS
+    set_seed(seed) 
+    
+    print(f"--- 🧠 Training {model_type} (alpha={alpha}) ---")
 
     X = data['X']
     y = data['y']
@@ -65,102 +90,135 @@ def train_model(data, model_type='SimpleQuantileNeuron', alpha=0.05, epochs=500,
         split_idx = int(num_samples * split_type['percentage'])
         window_size = num_samples - split_idx
     else:
-        # split_idx = split_type['index']
         date_rep = split_type['date']
         split_idx = len(dates[dates <= pd.to_datetime(date_rep)])
         window_size = 22
+    
     test_size = num_samples - split_idx
     iterate_number = test_size // window_size
-    # split_type={'percentage': 0.8}
 
+    # Prepare Anchor Dataframe globally if needed
     if regularization_pm is not None:
         weight = regularization_pm['weight']
         df = regularization_pm['df']
-        regularization_pm = regularization_pm
+        # Calculate full series of anchors first
         df_value_at_risk = priori_value_at_risk(df, rolling=rolling, alpha=alpha)
+        # Ensure alignment: Extract the anchor column as a Tensor/Array aligned with 'dates'
+        # This assumes 'dates' covers the same range as df_value_at_risk
+        # We need to ensure we can slice this exactly like X and y
+        full_anchor_series = df_value_at_risk.loc[dates, 'value_at_risk_param'].values
+        full_anchor_tensor = torch.tensor(full_anchor_series, dtype=torch.float32).unsqueeze(1)
         
     X_test_aux = []
     y_test_aux = [] 
     preds_test_aux = []
     dates_test_aux = []
+    last_model_state = None
 
     for i in range(iterate_number):
         # Slicing tensors
         X_train, y_train = X[:split_idx], y[:split_idx]
         X_test, y_test = X[split_idx:split_idx + window_size], y[split_idx:split_idx + window_size]
+        
+        # 2. FIX ANCHOR SLICING
+        if regularization_pm is not None:
+            # Slice the anchor exactly matching the X_train and X_test indices
+            # Note: We must slice from the full tensor we created earlier
+            y_priori_train = full_anchor_tensor[:split_idx]
+            y_priori_test = full_anchor_tensor[split_idx:split_idx + window_size]
+        else:
+            weight = 0
+            y_priori_train = 0
+            y_priori_test = 0
+
         if split_idx >= len(dates):
             break
         
-        if regularization_pm is not None:
-            date_var = dates[split_idx]
-            y_priori = df_value_at_risk.loc[date_var, 'value_at_risk_param']
-        else:
-            weight = 0
-            y_priori = 0
-        # Keep dates for plotting later
-        dates_train = dates[:split_idx]
         dates_test = dates[split_idx:split_idx + window_size]
 
-        print(f"    Train size: {len(X_train)} | Test size: {len(X_test)}")
+        if not silent:
+            print(f"    Train size: {len(X_train)} | Test size: {len(X_test)}")
 
-        # 2. Init Model & Optimizer
+        # Init Model
         if model_type == 'SimpleQuantileNeuron':
             model = SimpleQuantileNeuron(input_size=X_train.shape[1])
-        elif model_type == 'QuantileLSTM':
-            model = QuantileLSTM(input_size=X_train.shape[1])
+        elif model_type == 'QuantileLSTM': # Corrected name to match your snippet usage
+             # Assuming VolatilityLSTM was renamed or aliased
+             # Make sure to import VolatilityLSTM if that is the real name
+            model = QuantileLSTM(input_size=X_train.shape[1], hidden_size=hidden_size, num_layers=num_layers)
         
+        if pretrained_state_dict is not None:
+            model.load_state_dict(pretrained_state_dict)
+            if not silent:
+                print("--> Loaded pretrained weights (Warm Start)")
+
         criterion = QuantileLoss(alpha=alpha)
-        optimizer = optim.SGD(model.parameters(), lr=lr) 
-    
-        # History to track both curves
+        optimizer = optim.Adam(model.parameters(), lr=lr) 
+
         history = {"train_loss": [], "test_loss": []}
-        
         loss_prev = np.inf
 
-        # 3. Training Loop
+        # Training Loop
         for epoch in range(epochs):
             
-            # --- A. Training Step (Update Weights) ---
-            model.train() # Set mode to train
+            model.train()
+            # If LSTM, input needs to be (Batch, Seq, Feature) -> (Batch, 1, Feature)
+            # If SimpleNeuron, input usually (Batch, Feature)
+            # Check your model definition. Assuming unsqueeze is needed for LSTM:
+            if model_type == 'QuantileLSTM' or model_type == 'LSTM':
+                model_input = X_train.unsqueeze(1)
+            else:
+                model_input = X_train
+
+            preds_train = model(model_input)
             
-            # Forward pass on TRAIN data only
-            preds_train = model(X_train.unsqueeze(1))
-                      
-            loss_train = criterion(preds_train, y_train, weight, preds_prior=y_priori)
+            # Use the VECTOR y_priori_train, not a scalar
+            loss_train = criterion(preds_train, y_train, weight=weight, preds_prior=y_priori_train)
             
-            # Backward pass
             optimizer.zero_grad()
             loss_train.backward()
             optimizer.step()
             
-            # --- B. Validation Step (Check Performance) ---
-            model.eval() # Set mode to evaluation (disables dropout, etc.)
-            with torch.no_grad(): # No gradient calculation needed for test
-                # Forward pass on TEST data
-                preds_test = model(X_test.unsqueeze(1))
-                # Calculate Functional (Loss) on Test
-                loss_test = criterion(preds_test, y_test, weight, preds_prior=y_priori)
+            # Validation
+            model.eval()
+            with torch.no_grad():
+                if model_type == 'QuantileLSTM' or model_type == 'LSTM':
+                    test_input = X_test.unsqueeze(1)
+                else:
+                    test_input = X_test
+                
+                preds_test = model(test_input)
+                loss_test = criterion(preds_test, y_test, weight=weight, preds_prior=y_priori_test)
             
-            # Store results
             history["train_loss"].append(loss_train.item())
             history["test_loss"].append(loss_test.item())
             
             loss = loss_train.item()
-            # if loss == loss_prev:
-            if np.abs(1 - loss / loss_prev) < 0.0000001:
-                print(f"Early stopping at epoch {epoch}")
-                print(f"Loss {loss:.5f}, prev {loss_prev:.5f}")
+            
+            # Check for NaN (Exploding Gradients)
+            if np.isnan(loss):
+                print(f"❌ Error: Loss is NaN at epoch {epoch}. Reduce LR or Check Data.")
+                break
+
+            # Early Stopping (Optional: Relaxed tolerance)
+            if np.abs(1 - loss / (loss_prev + 1e-8)) < 0.000001:
+                 # Added small epsilon to prevent division by zero
+                if not silent: print(f"Early stopping at epoch {epoch}")
                 break
             else:
                 loss_prev = loss
-            # Print progress
-            if epoch % 100 == 0:
-                print(f"Epoch {epoch}: Train Loss={loss_train.item():.5f} | Test Loss={loss_test.item():.5f}")
+
         X_test_aux.append(X_test)
         y_test_aux.append(y_test)
         preds_test_aux.append(preds_test)
         dates_test_aux.append(dates_test)
+        
         split_idx += window_size
+        
+        # Capture state for next iteration (Warm Start)
+        last_model_state = model.state_dict()
+        pretrained_state_dict = last_model_state
+        
     return model, history, (X_train, y_train), (X_test_aux, y_test_aux, preds_test_aux, dates_test_aux)
 
 def analyze_var_functional(df, rolling=132, alpha=0.05, z0=1.645, 
@@ -255,6 +313,8 @@ def analyze_var_functional(df, rolling=132, alpha=0.05, z0=1.645,
     theoretical_loss = results_df.loc[theoretical_idx, 'loss']
     
     return results_df, loss_matrix, actual_std_values, actual_mean_values, optimal_params, theoretical_loss, avg_mean, avg_std
+
+
 
 def calculate_quantile_loss(returns, var_estimates, alpha=0.05, weight=1, var_priori=0):
     """

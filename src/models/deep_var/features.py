@@ -1,4 +1,5 @@
 import torch
+import pandas as pd
 
 def create_features(df, alpha=0.05, rolling=22, features=['log_ret']):
     """
@@ -50,4 +51,11 @@ def create_features(df, alpha=0.05, rolling=22, features=['log_ret']):
     X = torch.tensor(df_features[columns].values, dtype=torch.float32)
     y = torch.tensor(df_features[['target_return']].values, dtype=torch.float32)
     
-    return X, y, df_features.index
+    dates = pd.Series([pd.to_datetime(date) for date in df_features.index])
+    data = {
+        'dates': dates,
+        'y': y,
+        'X': X
+    }
+    
+    return data
