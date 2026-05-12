@@ -4,6 +4,9 @@
 
 **A journey from a failing "Naive" LSTM to a robust "Physics-Informed" Hybrid model for Bitcoin Risk Management.**
 
+> [!NOTE]
+> ⚠️ This standalone repo has been consolidated into quant-ai-lab/01_value_at_risk. Visit the main lab for the maintained version.
+
 ---
 
 ## 📊 Executive Summary
